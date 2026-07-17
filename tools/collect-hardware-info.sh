@@ -40,8 +40,6 @@ if have acpidump; then
   sudo acpidump > "$OUT/acpidump-full.txt" 2>/dev/null
   if have iasl; then
     mkdir -p "$OUT/acpi_disasm"
-    ( cd "$OUT/acpi_disasm" && sudo acpidump -b >/dev/null 2>&1; \
-      for f in ../*.dat *.dat dsdt.dat ssdt*.dat 2>/dev/null; do :; done )
     # Robust path: pull DSDT/SSDT straight from sysfs and disassemble.
     for tbl in /sys/firmware/acpi/tables/DSDT /sys/firmware/acpi/tables/SSDT*; do
       [ -f "$tbl" ] || continue
