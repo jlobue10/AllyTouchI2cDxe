@@ -8,12 +8,34 @@
     Layer 2  HID-over-I2C transport                   -- protocol model in I2cHid.h
     Layer 3  report -> EFI_ABSOLUTE_POINTER_PROTOCOL
 
-  Bring-up assumption (scenario (a) of DESIGN.md): firmware powered and
-  initialized the controller and panel during POST (the BIOS setup UI is touch
-  navigable) and that state persists to the boot-loader stage. The driver
-  therefore performs no reset-GPIO / _PS0 sequencing and no I2C-HID RESET; it
-  inherits the firmware-programmed bus timing, issues an idempotent
-  SET_POWER(ON), and polls input reports.
+  Bring-up model (updated after on-hardware testing, 2026-07-17):
+
+  In a normal boot the firmware leaves the FCH I2C controller tile
+  power-gated (AOAC device 5, see FchAoac.h), so scenario (a) of DESIGN.md
+  does NOT hold by default: the controller MMIO window reads garbage and the
+  first driver build failed its COMP_TYPE probe and returned EFI_UNSUPPORTED,
+  which in turn kept rEFInd from launching. Two consequences drive the
+  current shape of this driver:
+
+    1. The entry point never returns an error. If bring-up fails, the driver
+       stays resident and retries on a timer; the boot manager is never
+       exposed to a load failure.
+
+    2. The driver un-gates the I2C tile itself via the AOAC registers --
+       exactly what \_SB.I2CA._PS0 does -- before touching controller MMIO.
+       If the tile was freshly powered (firmware never programmed it), the
+       full 400 kHz timing is programmed rather than inherited.
+
+  The panel side (Novatek touch controller) may still need firmware
+  initialization that only the platform can do. The firmware provides that
+  path: holding/pressing VOLUME UP during the boot-animation splash powers
+  and initializes the touchscreen before the boot loader runs, after which
+  this driver finds a live panel immediately. Without it, the driver's AOAC
+  power-up + retry loop gives the panel a chance to respond anyway.
+
+  No reset-GPIO sequencing exists for this panel (none in the DSDT) and no
+  I2C-HID RESET is issued; the driver issues an idempotent SET_POWER(ON) and
+  polls input reports.
 
   Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -29,6 +51,7 @@
 #include <Protocol/AbsolutePointer.h>
 
 #include "DwI2c.h"
+#include "FchAoac.h"
 #include "I2cHid.h"
 
 //
@@ -45,6 +68,18 @@
 #define ALLY_POLL_PERIOD     (10 * 1000 * 10)    // 10 ms in 100 ns units
 #define ALLY_MAX_INPUT_LEN   256                 // sanity cap on wMaxInputLength
 #define ALLY_MAX_REPORT_DESC 4096                // sanity cap on wReportDescLength
+
+#define ALLY_RETRY_PERIOD    (1000 * 1000 * 10)  // 1 s in 100 ns units
+#define ALLY_RETRY_MAX       30                  // give up after ~30 s
+
+//
+// SCL counts for 400 kHz and SDA hold (~300 ns) at the 150 MHz Phoenix FCH
+// reference clock, programmed when the tile had to be powered on here (the
+// firmware never ran it, so there is no programming to inherit).
+//
+#define ALLY_FS_SCL_HCNT     136                 // ~0.9 us high
+#define ALLY_FS_SCL_LCNT     225                 // ~1.5 us low
+#define ALLY_SDA_HOLD        45                  // ~300 ns
 
 //
 // One extracted field of the input report: where the value lives (bit offset
@@ -77,10 +112,63 @@ typedef struct {
   ALLY_HID_FIELD                  Y;
   UINT8                           *InputBuf;      // wMaxInputLength bytes
   EFI_EVENT                       PollEvent;
+  EFI_EVENT                       RetryEvent;
+  UINTN                           RetryCount;
 } ALLY_TOUCH_DEV;
 
 #define ALLY_TOUCH_SIG  SIGNATURE_64 ('A','l','l','y','T','c','h','1')
 #define ALLY_TOUCH_FROM_ABS(a) BASE_CR (a, ALLY_TOUCH_DEV, AbsolutePointer)
+
+// ---------------------------------------------------------------------------
+// Layer 0: FCH AOAC power gating
+// ---------------------------------------------------------------------------
+
+/**
+  Make sure the I2C controller tile is out of D3 before its MMIO window is
+  touched. Mirrors \_SB.I2CA._PS0 -> \_SB.DSAD (5, 0): request D0, set
+  PwrOnDev, wait for the state ladder to report fully-on.
+
+  @param[out] FreshPowerOn  TRUE if the tile was gated and this call powered
+                            it on (i.e. firmware never programmed it and the
+                            bus timing must not be inherited).
+
+  @retval EFI_SUCCESS   Tile reports D0.
+  @retval EFI_TIMEOUT   Tile never reached D0.
+**/
+STATIC
+EFI_STATUS
+FchAoacPowerOnI2c (
+  OUT BOOLEAN  *FreshPowerOn
+  )
+{
+  UINT8  Ctl;
+  UINTN  WaitedUs;
+
+  *FreshPowerOn = FALSE;
+
+  if ((MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)) & FCH_AOAC_STATE_MASK)
+      == FCH_AOAC_STATE_D0) {
+    return EFI_SUCCESS;
+  }
+
+  Ctl  = MmioRead8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0));
+  Ctl &= ~FCH_AOAC_TARGET_STATE_MASK;            // target D0
+  Ctl |= FCH_AOAC_PWR_ON_DEV;
+  MmioWrite8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0), Ctl);
+
+  for (WaitedUs = 0; WaitedUs < 100000; WaitedUs += 100) {
+    if ((MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)) & FCH_AOAC_STATE_MASK)
+        == FCH_AOAC_STATE_D0) {
+      *FreshPowerOn = TRUE;
+      DEBUG ((DEBUG_INFO, "AllyTouch: AOAC powered on I2C0 tile\n"));
+      return EFI_SUCCESS;
+    }
+    gBS->Stall (100);
+  }
+
+  DEBUG ((DEBUG_ERROR, "AllyTouch: AOAC power-on of I2C0 timed out\n"));
+  return EFI_TIMEOUT;
+}
 
 // ---------------------------------------------------------------------------
 // Layer 1: DesignWare I2C master (MMIO, polled)
@@ -129,17 +217,19 @@ DwI2cSetEnable (
 /**
   Bring the controller into polled-master mode targeting SlaveAddr.
 
-  Firmware already ran this bus during POST (touch works in BIOS setup), so
-  the SCL high/low counts and SDA hold it programmed are known good for this
-  board; keep them and only reprogram what we must (master mode, target
-  address, FIFO thresholds). The count fallbacks are computed for the 150 MHz
-  Phoenix FCH reference clock and only used if a count register reads zero.
+  When the firmware ran this bus (touch works in BIOS setup), the SCL
+  high/low counts and SDA hold it programmed are known good for this board;
+  keep them and only reprogram what we must (master mode, target address,
+  FIFO thresholds). When ForceTiming is set -- the tile was just powered on
+  by FchAoacPowerOnI2c and holds only IP reset defaults -- program the
+  400 kHz counts computed for the 150 MHz Phoenix FCH reference clock.
 **/
 STATIC
 EFI_STATUS
 DwI2cInit (
-  IN UINT32  Base,
-  IN UINT8   SlaveAddr
+  IN UINT32   Base,
+  IN UINT8    SlaveAddr,
+  IN BOOLEAN  ForceTiming
   )
 {
   EFI_STATUS  Status;
@@ -164,7 +254,7 @@ DwI2cInit (
   // fast); the DSDT advertises 400 kHz for this bus.
   //
   Speed = DwRead (Base, DW_IC_CON) & (3u << 1);
-  if (Speed != DW_IC_CON_SPEED_STD) {
+  if (ForceTiming || Speed != DW_IC_CON_SPEED_STD) {
     Speed = DW_IC_CON_SPEED_FAST;
   }
   Con = DW_IC_CON_MASTER | DW_IC_CON_SLAVE_DISABLE | DW_IC_CON_RESTART_EN | Speed;
@@ -176,10 +266,15 @@ DwI2cInit (
       DwWrite (Base, DW_IC_SS_SCL_LCNT, 705);   // ~4.7 us low  @ 150 MHz
     }
   } else {
-    if (DwRead (Base, DW_IC_FS_SCL_HCNT) == 0 || DwRead (Base, DW_IC_FS_SCL_LCNT) == 0) {
-      DwWrite (Base, DW_IC_FS_SCL_HCNT, 136);   // ~0.9 us high @ 150 MHz
-      DwWrite (Base, DW_IC_FS_SCL_LCNT, 225);   // ~1.5 us low  @ 150 MHz
+    if (ForceTiming ||
+        DwRead (Base, DW_IC_FS_SCL_HCNT) == 0 || DwRead (Base, DW_IC_FS_SCL_LCNT) == 0) {
+      DwWrite (Base, DW_IC_FS_SCL_HCNT, ALLY_FS_SCL_HCNT);
+      DwWrite (Base, DW_IC_FS_SCL_LCNT, ALLY_FS_SCL_LCNT);
     }
+  }
+
+  if (ForceTiming) {
+    DwWrite (Base, DW_IC_SDA_HOLD, ALLY_SDA_HOLD);
   }
 
   DwWrite (Base, DW_IC_TAR, SlaveAddr);
@@ -771,37 +866,51 @@ AllyTouchPoll (
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// Bring-up and entry point
 // ---------------------------------------------------------------------------
 
+/**
+  One complete bring-up attempt: un-gate the controller tile, initialize the
+  bus, read the HID + report descriptors, and install the protocol. Safe to
+  call repeatedly on the same Dev; a failed attempt cleans up after itself
+  (Dev stays allocated for the next try).
+**/
+STATIC
 EFI_STATUS
-EFIAPI
-AllyTouchI2cDxeEntry (
-  IN EFI_HANDLE        ImageHandle,
-  IN EFI_SYSTEM_TABLE  *SystemTable
+AllyTouchTryInit (
+  IN OUT ALLY_TOUCH_DEV  *Dev
   )
 {
   EFI_STATUS      Status;
-  ALLY_TOUCH_DEV  *Dev;
   UINT8           *ReportDesc;
   UINTN           Drain;
   EFI_HANDLE      Handle;
+  BOOLEAN         FreshPowerOn;
 
-  Dev        = NULL;
   ReportDesc = NULL;
   Handle     = NULL;
 
-  Status = DwI2cInit (ALLY_I2C_BASE, ALLY_I2C_SLAVE_ADDR);
+  //
+  // Clear state a previous failed attempt may have left behind.
+  //
+  ZeroMem (&Dev->HidDesc, sizeof (Dev->HidDesc));
+  ZeroMem (&Dev->Tip, sizeof (Dev->Tip));
+  ZeroMem (&Dev->X, sizeof (Dev->X));
+  ZeroMem (&Dev->Y, sizeof (Dev->Y));
+  ZeroMem (&Dev->State, sizeof (Dev->State));
+  Dev->UsesReportIds = FALSE;
+  Dev->StateChanged  = FALSE;
+  Dev->TouchDown     = FALSE;
+
+  Status = FchAoacPowerOnI2c (&FreshPowerOn);
   if (EFI_ERROR (Status)) {
     return Status;
   }
 
-  Dev = AllocateZeroPool (sizeof (ALLY_TOUCH_DEV));
-  if (Dev == NULL) {
-    return EFI_OUT_OF_RESOURCES;
+  Status = DwI2cInit (ALLY_I2C_BASE, ALLY_I2C_SLAVE_ADDR, FreshPowerOn);
+  if (EFI_ERROR (Status)) {
+    return Status;
   }
-  Dev->Signature = ALLY_TOUCH_SIG;
-  Dev->I2cBase   = ALLY_I2C_BASE;
 
   //
   // HID descriptor: everything the transport needs for later transactions.
@@ -929,18 +1038,84 @@ Fail:
   if (ReportDesc != NULL) {
     FreePool (ReportDesc);
   }
-  if (Dev != NULL) {
-    if (Dev->PollEvent != NULL) {
-      gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
-      gBS->CloseEvent (Dev->PollEvent);
-    }
-    if (Dev->AbsolutePointer.WaitForInput != NULL) {
-      gBS->CloseEvent (Dev->AbsolutePointer.WaitForInput);
-    }
-    if (Dev->InputBuf != NULL) {
-      FreePool (Dev->InputBuf);
-    }
-    FreePool (Dev);
+  if (Dev->PollEvent != NULL) {
+    gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
+    gBS->CloseEvent (Dev->PollEvent);
+    Dev->PollEvent = NULL;
+  }
+  if (Dev->AbsolutePointer.WaitForInput != NULL) {
+    gBS->CloseEvent (Dev->AbsolutePointer.WaitForInput);
+    Dev->AbsolutePointer.WaitForInput = NULL;
+  }
+  if (Dev->InputBuf != NULL) {
+    FreePool (Dev->InputBuf);
+    Dev->InputBuf = NULL;
   }
   return Status;
+}
+
+/**
+  Periodic retry after a failed bring-up at load time. Covers the case where
+  the panel becomes ready only after the boot manager (and this driver) have
+  already started.
+**/
+STATIC
+VOID
+EFIAPI
+AllyTouchRetry (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  ALLY_TOUCH_DEV  *Dev = (ALLY_TOUCH_DEV *)Context;
+
+  Dev->RetryCount++;
+  if (!EFI_ERROR (AllyTouchTryInit (Dev))) {
+    DEBUG ((DEBUG_INFO, "AllyTouch: bring-up succeeded on retry %d\n",
+            (UINT32)Dev->RetryCount));
+  } else if (Dev->RetryCount < ALLY_RETRY_MAX) {
+    return;                                // periodic timer fires again
+  }
+
+  gBS->SetTimer (Event, TimerCancel, 0);
+  gBS->CloseEvent (Event);
+  Dev->RetryEvent = NULL;
+}
+
+EFI_STATUS
+EFIAPI
+AllyTouchI2cDxeEntry (
+  IN EFI_HANDLE        ImageHandle,
+  IN EFI_SYSTEM_TABLE  *SystemTable
+  )
+{
+  EFI_STATUS      Status;
+  ALLY_TOUCH_DEV  *Dev;
+
+  //
+  // This driver must never fail its entry point: rEFInd treats a driver
+  // load error as fatal enough to keep it from launching cleanly (observed
+  // on hardware with the EFI_UNSUPPORTED from the gated-tile probe). If
+  // anything goes wrong the driver stays resident and inert, or retries in
+  // the background.
+  //
+  Dev = AllocateZeroPool (sizeof (ALLY_TOUCH_DEV));
+  if (Dev == NULL) {
+    return EFI_SUCCESS;
+  }
+  Dev->Signature = ALLY_TOUCH_SIG;
+  Dev->I2cBase   = ALLY_I2C_BASE;
+
+  Status = AllyTouchTryInit (Dev);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN, "AllyTouch: bring-up failed at load: %r -- "
+            "retrying every 1 s (max %d)\n", Status, ALLY_RETRY_MAX));
+    Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                               AllyTouchRetry, Dev, &Dev->RetryEvent);
+    if (!EFI_ERROR (Status)) {
+      gBS->SetTimer (Dev->RetryEvent, TimerPeriodic, ALLY_RETRY_PERIOD);
+    }
+  }
+
+  return EFI_SUCCESS;
 }

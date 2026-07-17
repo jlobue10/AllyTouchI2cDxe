@@ -2,8 +2,10 @@
 #  AllyTouchI2cDxe -- produces EFI_ABSOLUTE_POINTER_PROTOCOL for the ROG Xbox
 #  Ally X Novatek NVTK0603 I2C-HID touchscreen, for use by rEFInd.
 #
-#  Hardware constants confirmed from the Ally X DSDT (see DESIGN.md); assumes
-#  firmware leaves the controller + panel powered and initialized (scenario a).
+#  Hardware constants confirmed from the Ally X DSDT (see DESIGN.md). Powers
+#  on the gated I2C controller tile itself (FCH AOAC) and retries bring-up in
+#  the background; the entry point never fails, so a missing/unpowered panel
+#  cannot break the boot manager.
 #
 #  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -20,6 +22,7 @@
 [Sources]
   AllyTouchI2cDxe.c
   DwI2c.h
+  FchAoac.h
   I2cHid.h
 
 [Packages]

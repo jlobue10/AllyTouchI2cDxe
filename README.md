@@ -3,7 +3,7 @@
 **Status: experimental / work in progress — not yet functional.**
 
 A UEFI driver that aims to make the **ASUS ROG Xbox Ally X** built-in touchscreen
-(**Goodix GT7868Q**, an I2C-HID device) usable in the [rEFInd](https://www.rodsbooks.com/refind/)
+(**Novatek NVTK0603**, an I2C-HID device) usable in the [rEFInd](https://www.rodsbooks.com/refind/)
 boot menu, by producing `EFI_ABSOLUTE_POINTER_PROTOCOL`. rEFInd consumes that
 protocol natively, so no rEFInd changes are needed — the driver is meant to load
 from rEFInd's `drivers_x64/` folder alongside
@@ -14,17 +14,30 @@ this one binds the I2C-HID touch panel that a USB driver structurally cannot see
 
 ## Why a whole new driver
 
-The Ally X touchscreen is **not** a USB device — it is a Goodix GT7868Q on the
+The Ally X touchscreen is **not** a USB device — it is a Novatek NVTK0603 on the
 SoC's **I2C** bus (ACPI `AMDI0010` DesignWare controller), spoken to with
 HID-over-I2C. A USB driver never sees it. Full rationale, architecture, and the
 feasibility spike are in **[DESIGN.md](DESIGN.md)**.
 
 ## Current state
 
-Feasibility looks favorable (no per-boot firmware upload; the panel is a standard
-HID-over-I2C device; ~500–800 LOC on the happy path). The project rides on **one
-on-hardware go/no-go check** — whether the firmware leaves the I2C controller +
-panel live at the boot-loader stage, or whether we must power them up.
+The driver is implemented and builds; first on-hardware test answered the
+go/no-go question: on a **normal** boot the firmware leaves the I2C controller
+tile power-gated, so the original build failed its probe — and returning that
+error from the entry point kept rEFInd from launching. Both are fixed:
+
+- the entry point **never returns an error** (worst case the driver sits idle
+  and retries in the background for ~30 s), so rEFInd always launches;
+- the driver **powers the I2C controller tile on itself** via the FCH AOAC
+  registers (the same thing ACPI `_PS0` does) and programs 400 kHz timing.
+
+### Tip: guaranteed touch bring-up
+
+If touch still does not respond, press **volume up during the boot-animation
+splash**: the firmware then powers *and* initializes the touchscreen before the
+boot loader starts, and the driver finds a live panel immediately. This is the
+supported fallback while we learn whether the Novatek panel needs firmware-side
+init that the driver cannot replicate.
 
 ### Start here
 
@@ -47,8 +60,9 @@ The probe result decides whether the driver is "just an I2C-HID reader"
 DESIGN.md                     feasibility spike, architecture, sources
 src/
   DwI2c.h                     DesignWare I2C register defs (standard)
+  FchAoac.h                   AMD FCH AOAC power-gating regs (un-gate I2C tile)
   I2cHid.h                    HID-over-I2C structs + opcodes (standard)
-  AllyTouchI2cDxe.inf/.c      driver skeleton (Layers 1-3, TODO(hardware))
+  AllyTouchI2cDxe.inf/.c      the driver (Layers 0-3)
 tools/
   collect-hardware-info.sh    Linux-side ACPI/I2C/GPIO dumper -> start here
   uefi-probe.md               the go/no-go procedure

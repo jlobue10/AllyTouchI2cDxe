@@ -108,6 +108,27 @@ so this is *not* fully settled and must be confirmed on hardware.) The decider i
 the Phase-1 probe (`tools/uefi-probe.md`): if the Goodix ACKs at the shell with
 no bring-up, we're in (a).
 
+### Field result (2026-07-17): scenario (a) is FALSE on a normal boot
+
+On-hardware test of the first driver build: bring-up failed with
+`EFI_UNSUPPORTED` (the `COMP_TYPE` probe — controller MMIO reads garbage) and,
+worse, returning that error from the entry point **kept rEFInd from launching**.
+Two findings changed the design:
+
+1. **The firmware leaves the touch path down on a normal boot.** The FCH I2C
+   controller tile is AOAC-power-gated (the DSDT's `\_SB.I2CA._PS0` calls
+   `DSAD (I2A0=5, 0)`, i.e. AOAC device 5 at `0xFED81E4A/4B`). The driver now
+   un-gates the tile itself (`src/FchAoac.h`) — scenario (b), controller side —
+   and programs full 400 kHz timing when the tile comes up cold.
+2. **Firmware escape hatch:** pressing **volume up during the boot-animation
+   splash** makes the firmware power *and initialize* the touchscreen before
+   the boot loader runs — scenario (a) on demand. This covers whatever
+   panel-side init the Novatek controller needs that we cannot do ourselves.
+
+Consequently the entry point now **never returns an error** (a rEFInd
+`drivers_x64` driver must not fail its entry), and failed bring-up is retried
+on a 1 s background timer (max 30 tries).
+
 ---
 
 ## Confirmed hardware facts (2026-07-17, from the RC73XA DSDT)
