@@ -1,8 +1,8 @@
 # AllyTouchI2cDxe
 
-**Status: implemented; still chasing first working touch on hardware.**
+**Status: working — confirmed on ROG Xbox Ally X hardware (v1.0.0).**
 
-A UEFI driver that aims to make the **ASUS ROG Xbox Ally X** built-in touchscreen
+A UEFI driver that makes the **ASUS ROG Xbox Ally X** built-in touchscreen
 (**Novatek NVTK0603**, an I2C-HID device) usable in the [rEFInd](https://www.rodsbooks.com/refind/)
 boot menu, by producing `EFI_ABSOLUTE_POINTER_PROTOCOL`. rEFInd consumes that
 protocol natively, so no rEFInd changes are needed — the driver is meant to load
@@ -21,19 +21,28 @@ feasibility spike are in **[DESIGN.md](DESIGN.md)**.
 
 ## Current state
 
+**Working.** On a ROG Xbox Ally X, the v5 build (release v1.0.0) detects the
+Novatek panel on its **first attempt** on a normal boot, completes HID-over-I2C
+bring-up, and delivers live touch input to rEFInd — moving the selection and
+launching entries by touch, confirmed across consecutive boots. The on-ESP
+diagnostic log from the confirming boots:
+
+```
+attempt 1: panel at base 0xFEDC2000 addr 0x01, VID 0x0603 PID 0xF200, reportdesc 1012 bytes, maxinput 56
+attempt 1: READY (reset ack seen, report id 1, range 1920x1080)
+first touch report: x=1062 y=585 (input path live)
+```
+
 All four layers are implemented — FCH AOAC power un-gating, DesignWare I2C
 master (polled), HID-over-I2C transport, and a minimal HID report-descriptor
-parser feeding `EFI_ABSOLUTE_POINTER_PROTOCOL`.
-
-On-hardware testing so far answered the go/no-go question: on a **normal**
-boot the firmware leaves the I2C controller tile power-gated, so the first
-build failed its probe — and returning that error from the entry point kept
-rEFInd from launching. Both are addressed:
+parser feeding `EFI_ABSOLUTE_POINTER_PROTOCOL`. Two hard-won hardware
+lessons are baked in:
 
 - the entry point **never returns an error** (worst case the driver sits idle
   and retries in the background for ~30 s), so rEFInd always launches;
 - the driver **powers the I2C controller tile on itself** via the FCH AOAC
-  registers (the same thing ACPI `_PS0` does) and programs 400 kHz timing.
+  registers (the same thing ACPI `_PS0` does) and programs 400 kHz timing —
+  on a normal boot the firmware leaves the tile power-gated.
 
 Detection targets the DSDT-confirmed panel first (controller `0xFEDC2000`,
 Novatek slave `0x01`, `wHIDDescRegister` `0x0000`) and falls back to a sweep
@@ -42,32 +51,28 @@ addresses (`0x01`/`0x14`/`0x5D`) × `wHIDDescRegister` values
 (`0x0000`/`0x0001`/`0x0020`). Bring-up follows the Linux `i2c-hid` sequence:
 `SET_POWER(ON)`, `RESET`, drain the reset acknowledge (best effort).
 
-What has **not** happened yet is working touch in rEFInd: with the AOAC
-self-power build, rEFInd launches but touch does not respond, so the panel
-likely needs firmware-side initialization the driver cannot replicate
-(scenario (b) of DESIGN.md) — or the volume-up path below.
+## Installing
 
-### Tip: guaranteed touch bring-up
+Drop [`AllyTouchI2cDxe.efi`](https://github.com/jlobue10/AllyTouchI2cDxe/releases/latest/download/AllyTouchI2cDxe.efi)
+into rEFInd's `drivers_x64/` folder on the ESP (next to `UsbXbox360Dxe.efi`
+if you use that too) and reboot. No configuration is needed. On Secure Boot
+setups that enforce their own signatures (e.g. CachyOS with sbctl), sign the
+`.efi` like the other rEFInd binaries.
 
-Press **volume up during the boot-animation splash**: the firmware then powers
-*and* initializes the touchscreen before the boot loader starts, and the
-driver finds a live panel immediately. This is the supported fallback while we
-learn whether the Novatek panel can be brought up from an unpowered state by
-the driver alone.
+[rEFInd_GUI](https://github.com/jlobue10/rEFInd_GUI) installs this driver
+automatically on ROG Xbox Ally / Ally X devices.
 
-### Testing on the Ally X
+### Troubleshooting
 
-1. **From the UEFI Shell first** (recommended): `load AllyTouchI2cDxe.efi`.
-   The detection log prints which controller/address/descriptor it found (or
-   that nothing answered). If it installs, `AllyTouchProbe.efi` and shell apps
-   aren't needed — go straight to rEFInd.
-2. **In rEFInd**: drop `AllyTouchI2cDxe.efi` into `drivers_x64/` next to
-   `UsbXbox360Dxe.efi` and reboot. Touch should move/select in the menu.
-3. **If nothing answers**: run [`tools/probe/AllyTouchProbe.efi`](tools/probe/AllyTouchProbe.c)
-   and [`tools/collect-hardware-info.sh`](tools/collect-hardware-info.sh) (Linux)
-   per [`tools/uefi-probe.md`](tools/uefi-probe.md) — that distinguishes
-   "nonstandard controller base" from "panel power-gated (scenario b)", which
-   would need a reset-GPIO/`_PS0` power-on step added to the driver.
+- If touch doesn't respond, press **volume up during the boot-animation
+  splash**: the firmware then powers and initializes the touchscreen itself
+  before the boot loader starts, and the driver finds the live panel
+  immediately.
+- The driver appends a diagnostic log to `\AllyTouch.log` on the ESP —
+  check it to see what detection found.
+- For deeper digging: run [`tools/probe/AllyTouchProbe.efi`](tools/probe/AllyTouchProbe.c)
+  from the UEFI Shell and [`tools/collect-hardware-info.sh`](tools/collect-hardware-info.sh)
+  (Linux) per [`tools/uefi-probe.md`](tools/uefi-probe.md).
 
 ## Layout
 
