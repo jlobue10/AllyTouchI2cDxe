@@ -23,6 +23,8 @@
 //
 // The HID descriptor register address (wHIDDescRegister). Confirmed 0x0000 on
 // the Ally X from ACPI (\_SB.I2CA.TPL0 _DSM function 1 returns HIDA[0]=0x00).
+// The generic-HIDI2C typical values 0x0001 / 0x0020 stay in the detection
+// sweep as fallbacks.
 //
 #define I2C_HID_DESC_REGISTER_DEFAULT  0x0000
 
@@ -77,5 +79,55 @@ typedef struct {
 #define I2C_HID_REPORT_TYPE_INPUT     0x01
 #define I2C_HID_REPORT_TYPE_OUTPUT    0x02
 #define I2C_HID_REPORT_TYPE_FEATURE   0x03
+
+//
+// Layer-2 API (I2cHid.c). All calls assume DwI2cInit already targeted the
+// device's slave address on this controller.
+//
+
+EFI_STATUS
+I2cHidReadRegister (
+  IN  UINT32  Base,
+  IN  UINT16  Reg,
+  OUT UINT8   *Buf,
+  IN  UINTN   Len
+  );
+
+/** Plain read (no register address) -- how input reports are retrieved. **/
+EFI_STATUS
+I2cHidRawRead (
+  IN  UINT32  Base,
+  OUT UINT8   *Buf,
+  IN  UINTN   Len
+  );
+
+EFI_STATUS
+I2cHidCommand (
+  IN UINT32  Base,
+  IN UINT16  CmdReg,
+  IN UINT8   Arg,
+  IN UINT8   Opcode
+  );
+
+EFI_STATUS
+I2cHidSetPower (
+  IN UINT32  Base,
+  IN UINT16  CmdReg,
+  IN UINT8   PowerState
+  );
+
+EFI_STATUS
+I2cHidReset (
+  IN UINT32  Base,
+  IN UINT16  CmdReg
+  );
+
+/** Read + validate the 30-byte HID descriptor at DescReg. **/
+EFI_STATUS
+I2cHidReadDescriptor (
+  IN  UINT32              Base,
+  IN  UINT16              DescReg,
+  OUT I2C_HID_DESCRIPTOR  *Desc
+  );
 
 #endif // _I2C_HID_H_

@@ -18,8 +18,8 @@ This document captures the feasibility spike that preceded any code.
 ## Why the existing USB gamepad driver can't do this
 
 `UsbXbox360Dxe` binds `EFI_USB_IO_PROTOCOL` — it only sees the **USB** bus. The
-Ally X touchscreen is a Goodix **GT7868Q on the SoC's I2C bus** (ACPI vendor
-`27C6`), serviced by `i2c-hid` / `hid-multitouch` under Linux. It never
+Ally X touchscreen is a Novatek **NVTK0603 on the SoC's I2C bus**, serviced by
+`i2c-hid` / `hid-multitouch` under Linux. It never
 enumerates over USB, so a USB driver structurally cannot see it. Touch in the
 boot menu therefore needs a **new** driver that speaks I2C-HID and produces
 `EFI_ABSOLUTE_POINTER_PROTOCOL` (which rEFInd already consumes natively — no
@@ -158,11 +158,13 @@ through this exact path (`i2c_hid_acpi` + `hid-multitouch`).
 ## Milestones
 
 1. **Probe** (`AllyTouchProbe.efi`) — resolve scenario (a)/(b). Doubles as
-   Layer 1 + a Layer-2 register read. *(scaffolded)*
-2. **Reader** — SET_POWER(on) + input-report poll; dump touch coordinates to the
-   console.
+   Layer 1 + a Layer-2 register read. *(implemented)*
+2. **Reader** — SET_POWER(on) + input-report poll. *(implemented, folded into
+   the driver; the driver auto-detects base/address/descreg at load, so the
+   probe is now only needed if detection fails)*
 3. **AbsolutePointer** — install `EFI_ABSOLUTE_POINTER_PROTOCOL`; verify rEFInd
-   moves its pointer / selects icons by touch.
+   moves its pointer / selects icons by touch. *(implemented; awaiting
+   on-hardware validation)*
 4. **Package** — release `.efi`; add its download to rEFInd_GUI's driver-install
    step (alongside `UsbXbox360Dxe.efi`), Ally-X-gated.
 

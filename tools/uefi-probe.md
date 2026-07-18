@@ -2,7 +2,7 @@
 
 The whole project hinges on one hardware fact that can only be checked on a real
 Ally X: **at the rEFInd / UEFI-Shell stage, is the AMD DesignWare I2C controller
-live and does the Goodix GT7868Q ACK — without us doing any GPIO/power/clock
+live and does the touch panel ACK — without us doing any GPIO/power/clock
 bring-up?** There are two phases, escalating in effort.
 
 ---
@@ -39,8 +39,8 @@ ACK?" test is a small app (`tools/probe/AllyTouchProbe.c/.inf`). It:
 
 - sweeps the five candidate controller bases, verifying each with `IC_COMP_TYPE`;
 - for each live controller, configures the master at 100 kHz and tries to read
-  the HID-over-I2C descriptor from both candidate Goodix slave addresses
-  (`0x14`, `0x5D`);
+  the HID-over-I2C descriptor from the candidate slave addresses
+  (Novatek `0x01`, Goodix `0x14`/`0x5D`);
 - reports one of: **no controller**, **SCENARIO (a)** panel ACKed + HID
   descriptor dumped (green light — driver is just an I2C-HID reader), or
   **SCENARIO (b)** controller live but panel NAKed (driver must add a
@@ -48,18 +48,17 @@ ACK?" test is a small app (`tools/probe/AllyTouchProbe.c/.inf`). It:
 
 ### Build it
 
-Use the **same EDK2 workspace/toolchain you already use for `UsbXbox360Dxe`**.
-Either add the INF to your platform DSC `[Components]`, or point `build` at it:
+Easiest: take `AllyTouchProbe.efi` from the repo's CI artifacts (every push
+builds it), or run `./test_build.sh` (Linux / WSL) at the repo root — it clones
+EDK2, builds the driver **and** the probe, and drops both into `output/`.
+
+Manual EDK2 build (same workspace/toolchain as `UsbXbox360Dxe`):
 
 ```
 # from your EDK2 workspace root, with AllyTouchI2cDxe checked out inside it
 build -a X64 -t GCC5 -p MdeModulePkg/MdeModulePkg.dsc \
       -m AllyTouchI2cDxe/tools/probe/AllyTouchProbe.inf
 ```
-
-(Any package DSC that provides `UefiApplicationEntryPoint`, `UefiLib`, `IoLib`
-works; `MdeModulePkg.dsc` or `ShellPkg.dsc` are convenient. The app only needs
-MdePkg library classes.)
 
 The output `AllyTouchProbe.efi` lands under
 `Build/<Pkg>/<TARGET>_<TOOLCHAIN>/X64/AllyTouchProbe.efi`.

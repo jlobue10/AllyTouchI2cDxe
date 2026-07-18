@@ -121,4 +121,58 @@
 //
 #define NVTK_I2C_ADDR       0x01
 
+//
+// Goodix candidate 7-bit slave addresses, kept for the fallback detection
+// sweep (other Ally-family panels are Goodix parts at one of these).
+//
+#define GOODIX_I2C_ADDR_A   0x14
+#define GOODIX_I2C_ADDR_B   0x5D
+
+//
+// Layer-1 API (DwI2c.c): polled master-mode init and combined transfer.
+//
+
+/** TRUE if IC_COMP_TYPE at this base reads back the DesignWare magic. **/
+BOOLEAN
+DwI2cControllerPresent (
+  IN UINT32  Base
+  );
+
+/** Disable the controller (best effort, bounded wait). **/
+VOID
+DwI2cDisable (
+  IN UINT32  Base
+  );
+
+/**
+  Bring the controller into polled master mode targeting SlaveAddr and enable.
+
+  When the firmware ran this bus, the SCL high/low counts and SDA hold it
+  programmed are known good for this board; they are kept and only master
+  mode, target address and FIFO thresholds are reprogrammed. When ForceTiming
+  is set -- the tile was just powered on via AOAC and holds only IP reset
+  defaults -- the 400 kHz counts for the 150 MHz Phoenix FCH reference clock
+  are programmed instead.
+**/
+EFI_STATUS
+DwI2cInit (
+  IN UINT32   Base,
+  IN UINT8    SlaveAddr,
+  IN BOOLEAN  ForceTiming
+  );
+
+/**
+  Write WLen bytes, then (if RLen > 0) repeated-START read RLen bytes, ending
+  with STOP. WLen == 0 issues a pure read. Returns EFI_NO_RESPONSE on address
+  NAK, EFI_DEVICE_ERROR on other aborts, EFI_TIMEOUT on stuck bus.
+**/
+EFI_STATUS
+DwI2cXfer (
+  IN  UINT32       Base,
+  IN  CONST UINT8  *WBuf,   OPTIONAL
+  IN  UINTN        WLen,
+  OUT UINT8        *RBuf,   OPTIONAL
+  IN  UINTN        RLen
+  );
+
 #endif // _DW_I2C_H_
