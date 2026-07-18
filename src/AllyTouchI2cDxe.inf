@@ -36,15 +36,19 @@
 [LibraryClasses]
   UefiDriverEntryPoint
   UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
   UefiLib
   BaseLib
   BaseMemoryLib
   MemoryAllocationLib
   IoLib
   DebugLib
+  PrintLib
 
 [Protocols]
   gEfiAbsolutePointerProtocolGuid            ## PRODUCES
+  gEfiLoadedImageProtocolGuid                ## CONSUMES
+  gEfiSimpleFileSystemProtocolGuid           ## CONSUMES
 
 [Depex]
   TRUE
